@@ -16,18 +16,44 @@ struct RGA_Node {
     char value;     // The character value
     bool is_deleted; // Tombstone to mark deletion
     std::string prev_id; // Stores previous character
+    std::map<char, int> version_vector;
 
-    RGA_Node(std::string id, char value, string prev_id = ""): id(id), value(value), is_deleted(false), prev_id(prev_id) {}
+    RGA_Node(std::string id, char value, std::map<char, int> version_vector, string prev_id = ""): id(id), value(value), is_deleted(false), version_vector(version_vector), prev_id(prev_id) {}
 };
 
 class RGA {
 private:
     std::vector<RGA_Node> nodes; // The main array storing the text
     std::map<std::string, size_t> id_to_index; // Map to quickly find nodes by ID
+    std::map<char, int> version_vector;
 
 public:
+    //
+    bool isDominate(const std::map<char, int>& a, const std::map<char, int>& b){
+        bool atleast_one_great = false;
+        for (const auto& [client, seq] : b) {
+            if (a.count(client) == 0 || a.at(client) < seq){
+                return false;
+            }
+            if (a.count(client) != 0 && a.at(client) > seq){
+                atleast_one_great = true;
+            }
+        }
+        for (const auto& [client, seq] : a){
+            if (b.count(client) == 0 && seq > 0){
+                atleast_one_great = true;
+            }
+        }
+        return atleast_one_great;
+    }
+
+    bool is_concurrent(const RGA_Node& a, const RGA_Node& b){
+        return !isDominate(a.version_vector,b.version_vector) && !isDominate(b.version_vector,a.version_vector); 
+    }
+
     // Insert a character at a specific position
     void insert(const std::string& id, char value, const string& prev_id = "") {
+        version_vector[id[0]]++;
         size_t index = nodes.size();
         if (prev_id != "" && id_to_index.find(prev_id) != id_to_index.end()) {
             index = id_to_index[prev_id] + 1;
@@ -40,7 +66,7 @@ public:
             }
         }
         
-        RGA_Node new_node(id, value, prev_id);
+        RGA_Node new_node(id, value, version_vector, prev_id);
         nodes.insert(nodes.begin() + index, new_node);
         id_to_index[id] = index;
 
@@ -91,20 +117,51 @@ public:
     }
 
     // Merge another RGA into this one (used for synchronization)
-    void merge(const RGA& other) {
+    void merge(RGA& other) {
         std::set<std::string> existing_ids;
         for (const auto& node : nodes) {
             existing_ids.insert(node.id);
         }
 
         for (const auto& other_node : other.nodes) {
-            if (existing_ids.find(other_node.id) == existing_ids.end()) {
-                insert(other_node.id, other_node.value, other_node.prev_id);
-                if (other_node.is_deleted) {
-                    remove(other_node.id);
+            if (!existing_ids.count(other_node.id)) {
+                // Resolve concurrent inserts at the same position
+                bool conflict = false;
+                for (const auto& local_node : nodes) {
+                    if (local_node.prev_id == other_node.prev_id) {
+                        if (is_concurrent(local_node, other_node)){
+                            conflict = true;
+                            // Tie-breaker: lexicographical node ID comparison
+                            if (other_node.id < local_node.id) {
+                                int index = id_to_index[local_node.id];
+                                nodes.insert(nodes.begin() + index, other_node);
+                            }
+                            else {
+                                int index = id_to_index[local_node.id] + 1;
+                                nodes.insert(nodes.begin() + index, other_node);
+                            }
+                            
+
+                        }
+                        else if(isDominate(local_node.version_vector,other_node.version_vector)){
+                            conflict = true;
+                            int index = id_to_index[local_node.id];
+                            nodes.insert(nodes.begin() + index, other_node);
+                        }
+                        else {
+                            conflict = true;
+                            int index = id_to_index[local_node.id] + 1;
+                            nodes.insert(nodes.begin() + index, other_node);
+                        }
+                        break;
+                    }
+                }
+                if (!conflict) {
+                    insert(other_node.id, other_node.value, other_node.prev_id);
                 }
             }
         }
+        other = *this;
     }
 
     // Print the current state of the document (ignoring deleted characters)
